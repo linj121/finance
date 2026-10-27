@@ -6,6 +6,7 @@
 """
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 
 import yaml
@@ -35,8 +36,16 @@ class Classifier:
     def __init__(self, rules_path: Path, memory_path: Path, ai_cfg: dict):
         cfg = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
         self.categories: dict[str, str] = cfg["categories"]
-        self.rules = [(_compile(r["match"]), r["category"]) for r in cfg.get("rules") or []]
-        for _, cat in self.rules:
+        # category -> parent group (Fixed / Essential / Optional / Not spending / Uncategorized)
+        self.groups: dict[str, str] = {c: g for g, cats in (cfg.get("groups") or {}).items() for c in cats}
+        unknown = set(self.groups) - set(self.categories)
+        missing = set(self.categories) - set(self.groups)
+        if unknown or missing:
+            raise ValueError(f"rules.yaml groups: unknown categories {sorted(unknown)}, "
+                             f"categories without a group {sorted(missing)}")
+        self.rules = [(_compile(r["match"]), r["category"], Decimal(str(r.get("min_amount", 0))))
+                      for r in cfg.get("rules") or []]
+        for _, cat, _ in self.rules:
             if cat not in self.categories:
                 raise ValueError(f"rules.yaml: rule uses unknown category {cat!r}")
         self.memory_path = memory_path
@@ -55,7 +64,8 @@ class Classifier:
         todo = [t for t in txns if t.category_source != "manual"]
         unknown: dict[str, list[Transaction]] = {}
         for t in todo:
-            cat = next((c for rx, c in self.rules if rx.search(t.description)), None)
+            cat = next((c for rx, c, low in self.rules
+                        if rx.search(t.description) and abs(t.amount) >= low), None)
             if cat:
                 t.category, t.category_source = cat, "rule"
                 continue

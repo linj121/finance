@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 
 from .classify import Classifier
-from .models import LEDGER_FIELDS, Transaction, assign_ids
+from .models import LEDGER_FIELDS, Balance, Transaction, assign_ids
 from .parsers import parse_file
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,7 +35,7 @@ def save_ledger(path: Path, txns: list[Transaction]) -> None:
         w.writerow(LEDGER_FIELDS)
         for t in txns:
             w.writerow([t.id, t.date.isoformat(), t.account, t.description, t.amount, t.currency,
-                        t.category, t.category_source, t.source_file])
+                        t.category, t.category_source, t.source_file, t.note])
 
 
 def _parser_fingerprint() -> str:
@@ -56,9 +56,19 @@ def _from_dict(d: dict) -> Transaction:
                        d["account"], d["source_file"], currency=d["currency"])
 
 
-def collect(statements_dir: Path, use_cache: bool = True) -> list[Transaction]:
+def _balance_to_dict(b: Balance | None) -> dict | None:
+    return b and {"account": b.account, "date": b.date.isoformat(), "amount": str(b.amount),
+                  "source_file": b.source_file}
+
+
+def _balance_from_dict(d: dict | None) -> Balance | None:
+    return d and Balance(d["account"], date.fromisoformat(d["date"]), Decimal(d["amount"]), d["source_file"])
+
+
+def collect(statements_dir: Path, use_cache: bool = True) -> tuple[list[Transaction], list[Balance]]:
     """Parse every statement, reusing cached results for files that haven't changed
-    (same size and modified time, same parser code). Failed files are never cached."""
+    (same size and modified time, same parser code). Failed files are never cached.
+    Returns the transactions and each statement's closing balance."""
     files = sorted(p for p in statements_dir.rglob("*") if p.suffix.lower() in (".pdf", ".csv"))
     key = {"parser": _parser_fingerprint(), "dir": str(statements_dir)}
     cache = {}
@@ -68,6 +78,7 @@ def collect(statements_dir: Path, use_cache: bool = True) -> list[Transaction]:
             cache = saved["files"]
 
     txns: list[Transaction] = []
+    balances: list[Balance] = []
     fresh: dict[str, dict] = {}
     reused = 0
     for p in files:
@@ -77,22 +88,26 @@ def collect(statements_dir: Path, use_cache: bool = True) -> list[Transaction]:
         hit = cache.get(rel)
         if hit and hit["sig"] == sig:
             got = [_from_dict(d) for d in hit["transactions"]]
+            bal = _balance_from_dict(hit.get("balance"))
             reused += 1
         else:
             try:
-                got = parse_file(p)
+                st = parse_file(p)
             except Exception as e:  # keep going; one odd file shouldn't block the rest
                 print(f"  ! {rel}: {e}")
                 continue
+            got, bal = st.transactions, st.balance
             print(f"  {rel}: {len(got)} transactions")
-        fresh[rel] = {"sig": sig, "transactions": [_to_dict(t) for t in got]}
+        fresh[rel] = {"sig": sig, "transactions": [_to_dict(t) for t in got], "balance": _balance_to_dict(bal)}
         txns.extend(got)
+        if bal:
+            balances.append(bal)
 
     CACHE_PATH.parent.mkdir(exist_ok=True)
     CACHE_PATH.write_text(json.dumps({**key, "files": fresh}, ensure_ascii=False), encoding="utf-8")
     if reused:
         print(f"  {reused} unchanged statements loaded from cache")
-    return txns
+    return txns, balances
 
 
 def cmd_run(args, cfg) -> None:
@@ -101,7 +116,7 @@ def cmd_run(args, cfg) -> None:
     print(f"Reading statements in {statements_dir}")
     if args.force:
         args.reclassify = True   # --force: re-read every statement and re-categorize every record
-    txns = collect(statements_dir, use_cache=not args.force)
+    txns, balances = collect(statements_dir, use_cache=not args.force)
     txns.sort(key=lambda t: (t.date, t.account))
     assign_ids(txns)
     # the same statement saved twice would otherwise double-count
@@ -115,6 +130,8 @@ def cmd_run(args, cfg) -> None:
         old = ledger.get(t.id)
         if old and (old["category_source"] == "manual" or not args.reclassify):
             t.category, t.category_source = old["category"], old["category_source"]
+        if old:
+            t.note = old.get("note") or ""
 
     # 2. pick up edits you made in Google Sheets
     g = cfg.get("google") or {}
@@ -126,7 +143,9 @@ def cmd_run(args, cfg) -> None:
         remote = {} if args.overwrite else sheets.read_categories(sh, g.get("worksheet", "Transactions"))
         edits = 0
         for t in txns:
-            cat, src = remote.get(t.id, ("", ""))
+            cat, src, note = remote.get(t.id, ("", "", None))
+            if note is not None:   # the sheet is where notes are written
+                t.note = note
             last_pushed = ledger.get(t.id, {}).get("category")
             # an edit = the cell no longer shows what we last wrote there
             edited = src == "manual" or (last_pushed is not None and cat != last_pushed)
@@ -148,7 +167,7 @@ def cmd_run(args, cfg) -> None:
     print(f"{len(txns)} transactions -> {ledger_path} ({uncategorized} uncategorized)")
 
     if sh is not None:
-        sheets.push(sh, g.get("worksheet", "Transactions"), txns, list(clf.categories))
+        sheets.push(sh, g.get("worksheet", "Transactions"), txns, clf.categories, clf.groups, balances)
         print(f"Synced to Google Sheets: {g['spreadsheet_url']}")
     elif not args.no_sync:
         print("Google sync skipped: set google.spreadsheet_url in config.yaml")
@@ -162,8 +181,9 @@ def cmd_inspect(args, cfg) -> None:
             print(f"===== page {i} =====")
             print(page.extract_text())
     try:
-        got = parse_file(Path(args.file))
-        print(f"\n===== parsed {len(got)} transactions =====")
+        st = parse_file(Path(args.file))
+        got = st.transactions
+        print(f"\n===== parsed {len(got)} transactions; closing balance: {st.balance} =====")
         for t in got:
             print(f"{t.date}  {t.amount:>10}  {t.account:<22} {t.description}")
     except Exception as e:
@@ -183,7 +203,9 @@ def cmd_analytics(args, cfg) -> None:
     from . import analytics, sheets
     g = cfg["google"]
     sh = sheets.open_sheet(g["spreadsheet_url"], str(ROOT / g["service_account_file"]))
-    analytics.build(sh)
+    clf = Classifier(ROOT / "rules.yaml", ROOT / "category_memory.json", cfg.get("ai", {}))
+    if analytics.build(sh, clf.groups):
+        print(f"Created the '{analytics.PLAN}' tab with starting budgets: edit it in the sheet")
     print(f"Rebuilt '{analytics.ANALYTICS}' and '{analytics.CHARTS}' tabs: {g['spreadsheet_url']}")
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pdfplumber
 
-from ..models import Transaction
+from ..models import Balance, Statement, Transaction
 
 MONTHS = {m: i for i, m in enumerate(
     ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], 1)}
@@ -23,14 +23,41 @@ def detect(path: Path, text: str) -> bool:
     return "ROYALBANK" in t or "RBC" in t
 
 
-def parse(path: Path) -> list[Transaction]:
+def parse(path: Path) -> Statement:
     if path.suffix.lower() == ".csv":
-        return _parse_csv(path)
+        return Statement(_parse_csv(path))
     with pdfplumber.open(path) as pdf:
         text = "\n".join((p.extract_text(x_tolerance=X_TOL) or "") for p in pdf.pages)
         if re.search(r"TRANSACTION\s+POSTING", text.upper()):
-            return _parse_card(pdf, text, path)
-        return _parse_deposit(pdf, text, path)
+            return _with_balance(_parse_card(pdf, text, path), text, path, "card")
+        return _with_balance(_parse_deposit(pdf, text, path), text, path, "chequing")
+
+
+AMOUNT = r"(-?\$?-?[\d,]+\.\d{2})"
+BALANCES = {   # (opening, closing) as printed on each kind of statement
+    "card": (re.compile(r"PREVIOUS ACCOUNT BALANCE\s*" + AMOUNT, re.I),
+             re.compile(r"TOTAL ACCOUNT BALANCE\s*" + AMOUNT, re.I)),
+    "chequing": (re.compile(r"Opening\s*balance[^\n]*?" + AMOUNT, re.I),
+                 re.compile(r"Closing\s*balance[^\n]*?" + AMOUNT, re.I)),
+}
+
+
+def _with_balance(txns: list[Transaction], text: str, path: Path, kind: str) -> Statement:
+    """Attach the closing balance, after checking opening + transactions = closing,
+    so a skipped or misread row can't slip through."""
+    o, c = (rx.search(text) for rx in BALANCES[kind])
+    if not (o and c):
+        return Statement(txns)
+    opening, closing = _money(o[1]), _money(c[1])
+    if kind == "card":   # the card prints what you owe; store it as a negative balance
+        opening, closing = -opening, -closing
+    flow = sum((t.amount for t in txns), Decimal(0))
+    if opening + flow != closing:
+        raise ValueError(f"balance mismatch: opening {opening} + transactions {flow} != closing {closing}")
+    m = (CARD_PERIOD if kind == "card" else DEP_PERIOD).search(text)
+    end = date(int(m[6]), MONTHS[m[4][:3].upper()], int(m[5]))
+    account = txns[0].account if txns else _account_label(text, kind, path)
+    return Statement(txns, Balance(account, end, closing, path.name))
 
 
 def _money(s: str) -> Decimal:

@@ -34,6 +34,28 @@ Order of precedence:
 4. **ai**: Claude picks one; the answer is remembered (`category_memory.json`), so each
    merchant is asked once.
 
+Each category also has a parent **group** in `rules.yaml` (`groups:`): Fixed, Essential,
+Optional, or Not spending (transfers, card payments, money paid for others: left out of
+income and spending). Every category must be in exactly one group.
+
+## Sheet tabs
+
+| Tab | Written by | What it is |
+|---|---|---|
+| Transactions | every run | all transactions. Edit **Category** (dropdown) or **Note**; both are kept |
+| Categories | every run | category list and its group |
+| Balances | every run | each statement's closing balance (card debt is negative) |
+| Plan | created once by `analytics`, then **never overwritten** | your budgets, savings goal, accounts without statements |
+| Analytics, Charts | `analytics` (rebuilt, edits discarded) | live formulas: month vs last month, groups, budget by category, largest expenses, drill-down, 12-month trend, balances and net worth |
+
+In Analytics, pick the month in B4 and the drill-down category next to "Transactions in
+category". A month the data doesn't fully cover is labelled partial; an account in Plan
+with no balance shows "Missing data" and is left out of net worth. To start Plan over,
+delete the tab and run `analytics`.
+
+Every PDF statement is checked: opening balance + parsed transactions must equal the
+closing balance, or the file is reported and skipped.
+
 ## Cache
 
 Parsed statements are cached in `.cache\`. A statement is re-read only when the file
