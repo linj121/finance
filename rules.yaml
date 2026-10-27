@@ -1,0 +1,44 @@
+# Categories: name -> hint (the hint helps Claude choose). Edit freely;
+# the list also feeds the Category dropdown in Google Sheets.
+categories:
+  Income: salary, payroll, government benefits, tax refunds
+  Groceries: supermarkets, grocery stores, Costco, T&T
+  Dining: restaurants, cafes, fast food, food delivery
+  Transportation: transit, Presto, Uber/Lyft rides, parking, tolls
+  Fuel: gas stations
+  Car: car payment, maintenance, registration
+  Housing: rent, mortgage, property tax, condo fees, home repairs
+  Utilities: hydro, gas, water
+  Phone & Internet: mobile, home internet
+  Insurance: home, auto, life insurance
+  Health: pharmacy, dental, medical, fitness
+  Shopping: Amazon, clothing, electronics, household goods
+  Entertainment: movies, games, events, hobbies
+  Subscriptions: streaming, software, memberships
+  Travel: flights, hotels, Airbnb, travel bookings
+  Education: tuition, courses, books
+  Kids: childcare, kids activities
+  Gifts & Donations: gifts, charity
+  Fees & Interest: bank fees, card interest, NSF, annual fees
+  Investments: transfers to brokerage, RRSP, TFSA contributions
+  Transfer: moving money between your own accounts, e-Transfers to self
+  Credit Card Payment: paying off a credit card (exclude from spending)
+  Cash: ATM withdrawals
+  Other: anything that fits nowhere else
+  Uncategorized: not yet categorized
+
+# Rules: first match wins. 'match' is a case-insensitive substring,
+# or a regex when prefixed with 're:'. Rules beat Claude's guesses.
+rules:
+  - {match: "PAYMENT - THANK YOU", category: Credit Card Payment}
+  - {match: "re:^PAYMENT THANK YOU|PAIEMENT MERCI", category: Credit Card Payment}
+  - {match: "re:VISA PAYMENT|MASTERCARD PAYMENT|AMEX PAYMENT", category: Credit Card Payment}
+  - {match: "AUTOMATIC PAYMENT", category: Credit Card Payment}
+  - {match: "RBC CREDIT CARD", category: Credit Card Payment}
+  - {match: "Payroll", category: Income}
+  - {match: "ATM withdrawal", category: Cash}
+  - {match: "Monthly fee", category: Fees & Interest}
+  - {match: "PURCHASE INTEREST", category: Fees & Interest}
+  - {match: "PRESTO", category: Transportation}
+  - {match: "NETFLIX", category: Subscriptions}
+  - {match: "SPOTIFY", category: Subscriptions}

@@ -1,0 +1,6 @@
+.venv/
+.cache/
+__pycache__/
+secrets/
+transactions.csv
+category_memory.json

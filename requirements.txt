@@ -1,0 +1,5 @@
+pdfplumber>=0.11
+gspread>=6.2
+google-auth>=2.0
+anthropic>=1.17
+pyyaml>=6.0
