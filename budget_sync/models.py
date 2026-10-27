@@ -32,6 +32,12 @@ class Balance:
     date: date
     amount: Decimal
     source_file: str
+    kind: str = "deposit"                  # deposit | card
+    # credit cards only, as printed on the statement
+    min_payment: Decimal | None = None
+    due_date: date | None = None
+    credit_limit: Decimal | None = None
+    rate: Decimal | None = None            # annual purchase interest rate, %
 
 
 @dataclass

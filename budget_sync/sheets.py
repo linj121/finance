@@ -8,6 +8,9 @@ HEADERS = ["ID", "Date", "Month", "Account", "Description", "Amount", "Currency"
            "Category", "Category Source", "Source File", "Note"]
 CATEGORIES_SHEET = "Categories"
 BALANCES_SHEET = "Balances"
+# A-C are read by the Analytics formulas; E-I by Outlook
+BALANCE_HEADERS = ["Account", "As of", "Balance", "Source File", "Kind",
+                   "Min Payment", "Due Date", "Credit Limit", "Interest Rate"]
 
 
 def open_sheet(url: str, key_file: str) -> gspread.Spreadsheet:
@@ -52,10 +55,13 @@ def push(sh: gspread.Spreadsheet, title: str, txns: list[Transaction], categorie
     cat_ws.clear()
     cat_ws.update([["Category", "Group"]] + [[c, groups.get(c, "")] for c in categories], "A1")
 
-    bal_ws = _worksheet(sh, BALANCES_SHEET, 4)
+    bal_ws = _worksheet(sh, BALANCES_SHEET, len(BALANCE_HEADERS))
     bal_ws.clear()
-    bal_ws.update([["Account", "As of", "Balance", "Source File"]] + [
-        [_text(b.account), b.date.isoformat(), float(b.amount), _text(b.source_file)]
+    num = lambda v: "" if v is None else float(v)
+    bal_ws.update([BALANCE_HEADERS] + [
+        [_text(b.account), b.date.isoformat(), float(b.amount), _text(b.source_file), b.kind,
+         num(b.min_payment), b.due_date.isoformat() if b.due_date else "", num(b.credit_limit),
+         "" if b.rate is None else float(b.rate) / 100]
         for b in sorted(balances, key=lambda b: (b.account, b.date))], "A1", value_input_option="USER_ENTERED")
     sh.batch_update({"requests": [
         {"repeatCell": {"range": {"sheetId": bal_ws.id, "startRowIndex": 1, "startColumnIndex": 1, "endColumnIndex": 2},
@@ -64,6 +70,10 @@ def push(sh: gspread.Spreadsheet, title: str, txns: list[Transaction], categorie
         {"repeatCell": {"range": {"sheetId": bal_ws.id, "startRowIndex": 1, "startColumnIndex": 2, "endColumnIndex": 3},
                         "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00;-$#,##0.00"}}},
                         "fields": "userEnteredFormat.numberFormat"}},
+        *[{"repeatCell": {"range": {"sheetId": bal_ws.id, "startRowIndex": 1, "startColumnIndex": c, "endColumnIndex": c + 1},
+                          "cell": {"userEnteredFormat": {"numberFormat": fmt}}, "fields": "userEnteredFormat.numberFormat"}}
+          for c, fmt in ((5, {"type": "CURRENCY", "pattern": "$#,##0.00"}), (6, {"type": "DATE", "pattern": "yyyy-mm-dd"}),
+                         (7, {"type": "CURRENCY", "pattern": "$#,##0.00"}), (8, {"type": "PERCENT", "pattern": "0.00%"}))],
     ]})
 
     ws = _worksheet(sh, title, len(HEADERS))

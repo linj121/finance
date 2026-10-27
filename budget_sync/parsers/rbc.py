@@ -57,7 +57,16 @@ def _with_balance(txns: list[Transaction], text: str, path: Path, kind: str) -> 
     m = (CARD_PERIOD if kind == "card" else DEP_PERIOD).search(text)
     end = date(int(m[6]), MONTHS[m[4][:3].upper()], int(m[5]))
     account = txns[0].account if txns else _account_label(text, kind, path)
-    return Statement(txns, Balance(account, end, closing, path.name))
+    bal = Balance(account, end, closing, path.name)
+    if kind == "card":
+        bal.kind = "card"
+        g = lambda rx: (re.search(rx, text, re.I) or [None, None])[1]
+        due = re.match(r"([A-Z]{3}) (\d{1,2}), (\d{4})", g(r"Payment due date\s*([A-Z]{3} \d{1,2}, \d{4})") or "")
+        bal.due_date = due and date(int(due[3]), MONTHS[due[1].upper()], int(due[2]))
+        bal.min_payment = (m := g(r"Minimum payment\s*" + AMOUNT)) and _money(m)
+        bal.credit_limit = (m := g(r"Credit limit\s*" + AMOUNT)) and _money(m)
+        bal.rate = (m := g(r"Purchases\s*(\d+\.\d+)%")) and Decimal(m)
+    return Statement(txns, bal)
 
 
 def _money(s: str) -> Decimal:

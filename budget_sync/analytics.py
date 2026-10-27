@@ -367,14 +367,15 @@ def _ensure_plan(sh: gspread.Spreadsheet, groups: dict[str, str]) -> bool:
 
 
 def _chart(sheet_id, src_id, title, kind, domain, series, row, col, legend=False, height=380, stacked=False):
+    upright = kind != "BAR"   # COLUMN / LINE: categories along the bottom
     spec = {
         "chartType": kind,
         "legendPosition": "BOTTOM_LEGEND" if legend else "NO_LEGEND",
         "headerCount": 1,
-        "axis": [{"position": "BOTTOM_AXIS" if kind == "COLUMN" else "LEFT_AXIS"}],
+        "axis": [{"position": "BOTTOM_AXIS" if upright else "LEFT_AXIS"}],
         "domains": [{"domain": {"sourceRange": {"sources": [_grid(src_id, domain)]}}}],
         "series": [{"series": {"sourceRange": {"sources": [_grid(src_id, rng)]}},
-                    "targetAxis": "LEFT_AXIS" if kind == "COLUMN" else "BOTTOM_AXIS",
+                    "targetAxis": "LEFT_AXIS" if upright else "BOTTOM_AXIS",
                     "colorStyle": {"rgbColor": _rgb(color)}} for rng, color in series],
     }
     if stacked:

@@ -8,7 +8,7 @@ import hashlib
 import json
 import shutil
 import sys
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -56,13 +56,27 @@ def _from_dict(d: dict) -> Transaction:
                        d["account"], d["source_file"], currency=d["currency"])
 
 
+BALANCE_DATES = ("date", "due_date")
+BALANCE_NUMBERS = ("amount", "min_payment", "credit_limit", "rate")
+
+
 def _balance_to_dict(b: Balance | None) -> dict | None:
-    return b and {"account": b.account, "date": b.date.isoformat(), "amount": str(b.amount),
-                  "source_file": b.source_file}
+    if b is None:
+        return None
+    d = dict(vars(b))
+    for k in BALANCE_DATES + BALANCE_NUMBERS:
+        d[k] = None if d[k] is None else (d[k].isoformat() if k in BALANCE_DATES else str(d[k]))
+    return d
 
 
 def _balance_from_dict(d: dict | None) -> Balance | None:
-    return d and Balance(d["account"], date.fromisoformat(d["date"]), Decimal(d["amount"]), d["source_file"])
+    if d is None:
+        return None
+    d = dict(d)
+    for k in BALANCE_DATES + BALANCE_NUMBERS:
+        if d.get(k) is not None:
+            d[k] = date.fromisoformat(d[k]) if k in BALANCE_DATES else Decimal(d[k])
+    return Balance(**d)
 
 
 def collect(statements_dir: Path, use_cache: bool = True) -> tuple[list[Transaction], list[Balance]]:
@@ -206,7 +220,23 @@ def cmd_analytics(args, cfg) -> None:
     clf = Classifier(ROOT / "rules.yaml", ROOT / "category_memory.json", cfg.get("ai", {}))
     if analytics.build(sh, clf.groups):
         print(f"Created the '{analytics.PLAN}' tab with starting budgets: edit it in the sheet")
-    print(f"Rebuilt '{analytics.ANALYTICS}' and '{analytics.CHARTS}' tabs: {g['spreadsheet_url']}")
+
+    # Bills & Goals is pre-filled (once) with recurring items seen in your history, unconfirmed
+    from . import outlook, recurring
+    rows = sh.worksheet(sheets.BALANCES_SHEET).get_all_records()   # dates shown as yyyy-mm-dd
+    latest: dict[str, date] = {}
+    for r in rows:
+        d = date.fromisoformat(str(r["As of"]))
+        latest[r["Account"]] = max(d, latest.get(r["Account"], d))
+    deposits = [latest[r["Account"]] for r in rows if r.get("Kind") == "deposit"]
+    start = max(deposits) if deposits else date.today()
+    complete = min(latest.values()) if latest else date.today()
+    month_end = recurring._shift(date(complete.year, complete.month, 1), 1) - timedelta(days=1)
+    last_full = recurring._shift(date(complete.year, complete.month, 1), 0 if complete == month_end else -1)
+    ledger = list(load_ledger(ROOT / cfg.get("output_csv", "transactions.csv")).values())
+    if outlook.build(sh, recurring.suggest(ledger, clf.groups, last_full), start):
+        print(f"Created the '{outlook.INPUTS}' tab: confirm the suggested bills there")
+    print(f"Rebuilt '{analytics.ANALYTICS}', '{analytics.CHARTS}' and '{outlook.OUTLOOK}' tabs: {g['spreadsheet_url']}")
 
 
 def main() -> None:
