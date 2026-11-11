@@ -27,23 +27,17 @@ class Transaction:
 
 @dataclass
 class Balance:
-    """A statement's closing balance. Debts (credit cards) are negative."""
+    """An account's balance on a date (from balances.csv). Debts (credit cards) are negative."""
     account: str
     date: date
     amount: Decimal
     source_file: str
     kind: str = "deposit"                  # deposit | card
-    # credit cards only, as printed on the statement
+    # credit cards only, as printed on the latest statement
     min_payment: Decimal | None = None
     due_date: date | None = None
     credit_limit: Decimal | None = None
     rate: Decimal | None = None            # annual purchase interest rate, %
-
-
-@dataclass
-class Statement:
-    transactions: list[Transaction]
-    balance: Balance | None = None   # None when the file has no balance (e.g. CSV export)
 
 
 def assign_ids(txns: list[Transaction]) -> None:

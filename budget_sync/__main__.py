@@ -1,25 +1,21 @@
 """Usage (from the project folder):
     .venv\\Scripts\\python -m budget_sync run [--no-sync] [--no-ai] [--reclassify]
-    .venv\\Scripts\\python -m budget_sync inspect <statement.pdf>
+    .venv\\Scripts\\python -m budget_sync analytics
 """
 import argparse
 import csv
-import hashlib
-import json
-import shutil
 import sys
 from datetime import date, timedelta
-from decimal import Decimal
 from pathlib import Path
 
 import yaml
 
 from .classify import Classifier
-from .models import LEDGER_FIELDS, Balance, Transaction, assign_ids
+from . import balances
+from .models import LEDGER_FIELDS, Transaction, assign_ids
 from .parsers import parse_file
 
 ROOT = Path(__file__).resolve().parent.parent
-CACHE_PATH = ROOT / ".cache" / "statements.json"
 
 
 def load_ledger(path: Path) -> dict[str, dict]:
@@ -38,103 +34,45 @@ def save_ledger(path: Path, txns: list[Transaction]) -> None:
                         t.category, t.category_source, t.source_file, t.note])
 
 
-def _parser_fingerprint() -> str:
-    """Changes whenever parser code changes, so a parser fix re-reads every statement."""
-    h = hashlib.sha1()
-    for p in sorted((ROOT / "budget_sync" / "parsers").glob("*.py")):
-        h.update(p.read_bytes())
-    return h.hexdigest()[:12]
-
-
-def _to_dict(t: Transaction) -> dict:
-    return {"date": t.date.isoformat(), "description": t.description, "amount": str(t.amount),
-            "account": t.account, "source_file": t.source_file, "currency": t.currency}
-
-
-def _from_dict(d: dict) -> Transaction:
-    return Transaction(date.fromisoformat(d["date"]), d["description"], Decimal(d["amount"]),
-                       d["account"], d["source_file"], currency=d["currency"])
-
-
-BALANCE_DATES = ("date", "due_date")
-BALANCE_NUMBERS = ("amount", "min_payment", "credit_limit", "rate")
-
-
-def _balance_to_dict(b: Balance | None) -> dict | None:
-    if b is None:
-        return None
-    d = dict(vars(b))
-    for k in BALANCE_DATES + BALANCE_NUMBERS:
-        d[k] = None if d[k] is None else (d[k].isoformat() if k in BALANCE_DATES else str(d[k]))
-    return d
-
-
-def _balance_from_dict(d: dict | None) -> Balance | None:
-    if d is None:
-        return None
-    d = dict(d)
-    for k in BALANCE_DATES + BALANCE_NUMBERS:
-        if d.get(k) is not None:
-            d[k] = date.fromisoformat(d[k]) if k in BALANCE_DATES else Decimal(d[k])
-    return Balance(**d)
-
-
-def collect(statements_dir: Path, use_cache: bool = True) -> tuple[list[Transaction], list[Balance]]:
-    """Parse every statement, reusing cached results for files that haven't changed
-    (same size and modified time, same parser code). Failed files are never cached.
-    Returns the transactions and each statement's closing balance."""
-    files = sorted(p for p in statements_dir.rglob("*") if p.suffix.lower() in (".pdf", ".csv"))
-    key = {"parser": _parser_fingerprint(), "dir": str(statements_dir)}
-    cache = {}
-    if use_cache and CACHE_PATH.exists():
-        saved = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        if all(saved.get(k) == v for k, v in key.items()):
-            cache = saved["files"]
-
-    txns: list[Transaction] = []
-    balances: list[Balance] = []
-    fresh: dict[str, dict] = {}
-    reused = 0
-    for p in files:
-        rel = str(p.relative_to(statements_dir))
-        st = p.stat()
-        sig = [st.st_size, st.st_mtime_ns]
-        hit = cache.get(rel)
-        if hit and hit["sig"] == sig:
-            got = [_from_dict(d) for d in hit["transactions"]]
-            bal = _balance_from_dict(hit.get("balance"))
-            reused += 1
-        else:
-            try:
-                st = parse_file(p)
-            except Exception as e:  # keep going; one odd file shouldn't block the rest
-                print(f"  ! {rel}: {e}")
-                continue
-            got, bal = st.transactions, st.balance
-            print(f"  {rel}: {len(got)} transactions")
-        fresh[rel] = {"sig": sig, "transactions": [_to_dict(t) for t in got], "balance": _balance_to_dict(bal)}
-        txns.extend(got)
-        if bal:
-            balances.append(bal)
-
-    CACHE_PATH.parent.mkdir(exist_ok=True)
-    CACHE_PATH.write_text(json.dumps({**key, "files": fresh}, ensure_ascii=False), encoding="utf-8")
-    if reused:
-        print(f"  {reused} unchanged statements loaded from cache")
-    return txns, balances
+def collect(data_dir: Path) -> list[Transaction]:
+    """Read every transaction CSV under data_dir (subfolders included).
+    Downloads may overlap (e.g. a per-account export and RBC's all-accounts export), and the
+    same transaction can be worded differently in each ("CONTACTLESS INTERAC PURCHASE - 3597"
+    vs "C-IDP PURCHASE-3597"). So transactions are matched on account, date and amount, and
+    each is kept as many times as the file that has it most often - not once per file. Two
+    identical coffees on one day appear twice in each file and are both kept. Between files
+    with the same count, the longer (more detailed) descriptions win."""
+    best: dict[tuple, list[Transaction]] = {}
+    rank = lambda ts: (len(ts), sum(len(t.description) for t in ts))
+    for p in sorted(data_dir.rglob("*.csv")):
+        rel = p.relative_to(data_dir).as_posix()
+        if rel == balances.FILE_NAME:
+            continue
+        try:
+            got = parse_file(p, rel)
+        except Exception as e:  # keep going; one odd file shouldn't block the rest
+            print(f"  ! {rel}: {e}")
+            continue
+        print(f"  {rel}: {len(got)} transactions")
+        by_key: dict[tuple, list[Transaction]] = {}
+        for t in got:
+            by_key.setdefault((t.account, t.date, t.amount), []).append(t)
+        for k, ts in by_key.items():
+            if k not in best or rank(ts) > rank(best[k]):
+                best[k] = ts
+    return [t for ts in best.values() for t in ts]
 
 
 def cmd_run(args, cfg) -> None:
-    statements_dir = Path(cfg["statements_dir"])
+    data_dir = ROOT / cfg.get("data_dir", "data")
     ledger_path = ROOT / cfg.get("output_csv", "transactions.csv")
-    print(f"Reading statements in {statements_dir}")
-    if args.force:
-        args.reclassify = True   # --force: re-read every statement and re-categorize every record
-    txns, balances = collect(statements_dir, use_cache=not args.force)
+    print(f"Reading CSV files in {data_dir}")
+    txns = collect(data_dir)
     txns.sort(key=lambda t: (t.date, t.account))
     assign_ids(txns)
-    # the same statement saved twice would otherwise double-count
-    txns = list({t.id: t for t in txns}.values())
+    bals = balances.roll_forward(balances.load(data_dir / balances.FILE_NAME), txns)
+    if not bals:
+        print(f"  no balances: add {data_dir / balances.FILE_NAME} for net worth and the Outlook tab")
 
     clf = Classifier(ROOT / "rules.yaml", ROOT / "category_memory.json", cfg.get("ai", {}))
 
@@ -181,36 +119,10 @@ def cmd_run(args, cfg) -> None:
     print(f"{len(txns)} transactions -> {ledger_path} ({uncategorized} uncategorized)")
 
     if sh is not None:
-        sheets.push(sh, g.get("worksheet", "Transactions"), txns, clf.categories, clf.groups, balances)
+        sheets.push(sh, g.get("worksheet", "Transactions"), txns, clf.categories, clf.groups, bals)
         print(f"Synced to Google Sheets: {g['spreadsheet_url']}")
     elif not args.no_sync:
         print("Google sync skipped: set google.spreadsheet_url in config.yaml")
-
-
-def cmd_inspect(args, cfg) -> None:
-    """Dump what pdfplumber sees - used to build/fix a parser for a new statement layout."""
-    import pdfplumber
-    with pdfplumber.open(args.file) as pdf:
-        for i, page in enumerate(pdf.pages, 1):
-            print(f"===== page {i} =====")
-            print(page.extract_text())
-    try:
-        st = parse_file(Path(args.file))
-        got = st.transactions
-        print(f"\n===== parsed {len(got)} transactions; closing balance: {st.balance} =====")
-        for t in got:
-            print(f"{t.date}  {t.amount:>10}  {t.account:<22} {t.description}")
-    except Exception as e:
-        print(f"\nparser failed: {e}")
-
-
-def cmd_clear_cache(args, cfg) -> None:
-    cache_dir = CACHE_PATH.parent
-    if cache_dir.exists():
-        shutil.rmtree(cache_dir)
-        print(f"Deleted {cache_dir}; the next run re-reads every statement.")
-    else:
-        print("No cache to clear.")
 
 
 def cmd_analytics(args, cfg) -> None:
@@ -243,24 +155,17 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="budget_sync")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="parse statements, categorize, sync")
+    r = sub.add_parser("run", help="read CSV files, categorize, sync")
     r.add_argument("--no-sync", action="store_true", help="skip Google Sheets")
     r.add_argument("--no-ai", action="store_true", help="don't call Claude for unknown merchants")
-    r.add_argument("--force", action="store_true",
-                   help="ignore the cache: re-read every statement and re-categorize every record "
-                        "(manual edits are kept)")
     r.add_argument("--overwrite", action="store_true",
                    help="replace the Google Sheet with the local copy, ignoring edits made in the sheet")
     r.add_argument("--reclassify", action="store_true",
                    help="re-apply rules to everything except manual edits (after editing rules.yaml)")
-    i = sub.add_parser("inspect", help="show a statement's raw text and parse result")
-    i.add_argument("file")
     sub.add_parser("analytics", help="(re)build the Analytics and Charts tabs - discards edits made on them")
-    sub.add_parser("clear-cache", help="delete cached statement parses so the next run re-reads everything")
     args = ap.parse_args()
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
-    {"run": cmd_run, "inspect": cmd_inspect, "analytics": cmd_analytics,
-     "clear-cache": cmd_clear_cache}[args.cmd](args, cfg)
+    {"run": cmd_run, "analytics": cmd_analytics}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":
