@@ -13,7 +13,7 @@ from datetime import date
 
 import gspread
 
-from .analytics import (INK_MUTED, INPUT_BG, MONEY, DAY_FMT, PCT, BLUE, OVER_BG, WARN_BG, GOOD_BG,
+from .analytics import (INK_MUTED, INPUT_BG, MONEY, DAY_FMT, PCT, BLUE, OVER_BG, WARN_BG, GOOD_BG, NOT_MONTH_END,
                         _chart, _fmt, _grid, _recreate, _rgb, _when, _width, f)
 from .recurring import Suggestion
 
@@ -138,8 +138,10 @@ CELLS = {
     # ---- emergency fund
     "O4": "Emergency fund",
     "O5": f'="Fund: latest balance of "&{EF_ACCT}',
+    # latest balance, skipping the month-end rows (they repeat a balance on another row's date)
     "P5": f'=IF(COUNTIF(Balances!$A$2:$A,{EF_ACCT})=0,"Missing data",SUMIFS(Balances!$C$2:$C,Balances!$A$2:$A,'
-          f'{EF_ACCT},Balances!$B$2:$B,MAXIFS(Balances!$B$2:$B,Balances!$A$2:$A,{EF_ACCT})))',
+          f'{EF_ACCT},{NOT_MONTH_END},Balances!$B$2:$B,MAXIFS(Balances!$B$2:$B,'
+          f'Balances!$A$2:$A,{EF_ACCT},{NOT_MONTH_END})))',
     "O6": "Essential spending per month (Fixed + Essential, 6-month avg)", "P6": f("=" + ESSENTIAL6),
     "O7": "Months it would cover", "P7": '=IF(ISNUMBER(P5),IF(P6=0,"N/A",P5/P6),"Missing data")',
     "O8": f'="Target: "&{EF_MONTHS}&" months"', "P8": f"={EF_MONTHS}*P6",
