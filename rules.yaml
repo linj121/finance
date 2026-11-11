@@ -54,6 +54,10 @@ rules:
   - {match: "Payroll", category: Income}
   - {match: "Deposit interest", category: Income}   # also "Bonus deposit interest"
   - {match: "ATM withdrawal", category: Cash}
+  - {match: "ATM deposit", category: Transfer}             # your own cash going in: not income, not negative spending
+  - {match: "ITEM RETURNED NSF", category: Housing}        # bounced rent payment coming back; cancels the payment
+  - {match: "EXPIRED INTERAC E-TRANSFER CREDIT", category: Shared costs}   # refund of an e-Transfer you sent
+  - {match: "CELPIP", category: Immigration}               # language test for PR
   - {match: "Monthly fee", category: Fees & Interest}
   - {match: "PURCHASE INTEREST", category: Fees & Interest}
   - {match: "PRESTO", category: Transportation}
