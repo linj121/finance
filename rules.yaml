@@ -75,7 +75,9 @@ rules:
   - {match: "re:e-Transfer - (Autodeposit|Request Money) QILIN XIAO", category: Paid for others, min_amount: 1000}
   # Dalue's car rentals, paid by you and paid back by him
   - {match: "ENTERPRISE CANADA", category: Paid for others}
-  - {match: "re:e-Transfer - (Autodeposit|Request Money) DALUE TANG", category: Paid for others, min_amount: 1000}
+  - {match: "ERACTOLL", category: Paid for others}          # tolls on Enterprise rentals
+  # he also sends e-Transfers as "TARIO"
+  - {match: "re:e-Transfer - (Autodeposit|Request Money) (DALUE TANG|TARIO)", category: Paid for others, min_amount: 1000}
   # King William Residence: rent paid for friends (肖奇林, 陈良意 via ZIHAO ZHOU, 屠锦浩 JINHAO TU, 唐大略 DALUE TANG)
   - {match: "re:King ?Willia|YSI\\*PROP PYMT", category: Paid for others}
   - {match: "re:e-Transfer - (Autodeposit|Request Money) (ZIHAO ZHOU|JINHAO TU)", category: Paid for others, min_amount: 400}
