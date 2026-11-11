@@ -34,10 +34,12 @@ RBC Chequing ...0177,2026-10-15,1109.68,deposit,,,,
 RBC Credit ...3503,2026-09-28,-967.12,card,10.00,2026-10-19,2500.00,20.99
 ```
 
-Balance is at the end of the As of day; card debt is negative. A bank account's latest
-balance is rolled forward through later transactions, so one entry stays current as you
-download new CSVs. Update a card row from each new card statement (Outlook pays that
-statement's balance). Account names are `RBC <Chequing|Saving|Credit> ...<last 4 digits>`.
+Balance is at the end of the As of day; **card debt is negative** (a positive card balance
+is reported as a warning). Add a card row from each new card statement: Outlook pays that
+statement's balance. One row per bank account is enough. From these rows and the
+transactions, every run also works out each account's current balance and its balance on
+every month end (for the cash and net-worth trends). Account names are
+`RBC <Chequing|Saving|Credit> ...<last 4 digits>`.
 
 ## Categories
 
@@ -61,14 +63,14 @@ income and spending). Every category must be in exactly one group.
 |---|---|---|
 | Transactions | every run | all transactions. Edit **Category** (dropdown) or **Note**; both are kept |
 | Categories | every run | category list and its group |
-| Balances | every run | rows of `data\balances.csv`, plus each bank account's balance rolled forward to its latest transaction (card debt is negative) |
+| Balances | every run | rows of `data\balances.csv`, plus derived rows: each account's current balance (`deposit` / `card current`) and month-end balances (`… month-end`). Card debt is negative |
 | Plan | created once by `analytics`, then **never overwritten** | your budgets, savings goal, accounts without statements |
-| Analytics, Charts | `analytics` (rebuilt, edits discarded) | live formulas: month vs last month, groups, budget by category, largest expenses, drill-down, 12-month trend, balances and net worth |
+| Analytics, Charts | `analytics` (rebuilt, edits discarded) | live formulas. A scorecard of four habits over the last 12 complete months (savings rate ≥ 20%, emergency fund ≥ 3 months of essential spending, no card interest, growing net worth); the picked month vs the one before; groups vs budget; balances; 12-month trend; spending by category; drill-down. Charts: one per habit |
 | Bills & Goals | created once by `analytics`, then **never overwritten** | recurring income and bills (pre-filled with suggestions from your history, unconfirmed), one-off costs to save for, savings goals, emergency-fund settings |
 | Outlook | `analytics` (rebuilt) | next 30 days of cash, recurring commitments, emergency fund, where your cash stands, credit card, one-off costs, goals, "can I afford my plans?" |
 
 Only items ticked **Confirmed** on Bills & Goals count in the forecast. The forecast starts at
-your latest statement date; to start from today, type today's date and cash there.
+the date of your latest bank transaction; to start from today, type today's date and cash there.
 
 In Analytics, pick the month in B4 and the drill-down category next to "Transactions in
 category". A month the data doesn't fully cover is labelled partial; an account in Plan
