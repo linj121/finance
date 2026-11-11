@@ -4,6 +4,7 @@
 """
 import argparse
 import csv
+import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from .models import LEDGER_FIELDS, Transaction, assign_ids
 from .parsers import parse_file
 
 ROOT = Path(__file__).resolve().parent.parent
+PUSHED_PATH = ROOT / ".cache" / "pushed_categories.json"   # categories as last written to the sheet
 
 
 def load_ledger(path: Path) -> dict[str, dict]:
@@ -70,7 +72,7 @@ def cmd_run(args, cfg) -> None:
     txns = collect(data_dir)
     txns.sort(key=lambda t: (t.date, t.account))
     assign_ids(txns)
-    bals = balances.roll_forward(balances.load(data_dir / balances.FILE_NAME), txns)
+    bals = balances.derive(balances.load(data_dir / balances.FILE_NAME), txns)
     if not bals:
         print(f"  no balances: add {data_dir / balances.FILE_NAME} for net worth and the Outlook tab")
 
@@ -94,11 +96,14 @@ def cmd_run(args, cfg) -> None:
         # --overwrite: the local copy wins; changes made in the sheet are discarded
         remote = {} if args.overwrite else sheets.read_categories(sh, g.get("worksheet", "Transactions"))
         edits = 0
+        # What the sheet was last given. Not the local ledger: a --no-sync run changes the
+        # ledger but not the sheet, and the sheet's older value would look like your edit.
+        pushed = json.loads(PUSHED_PATH.read_text(encoding="utf-8")) if PUSHED_PATH.exists() else {}
         for t in txns:
             cat, src, note = remote.get(t.id, ("", "", None))
             if note is not None:   # the sheet is where notes are written
                 t.note = note
-            last_pushed = ledger.get(t.id, {}).get("category")
+            last_pushed = pushed.get(t.id, ledger.get(t.id, {}).get("category"))
             # an edit = the cell no longer shows what we last wrote there
             edited = src == "manual" or (last_pushed is not None and cat != last_pushed)
             if edited and cat in clf.categories and cat != "Uncategorized":
@@ -120,6 +125,8 @@ def cmd_run(args, cfg) -> None:
 
     if sh is not None:
         sheets.push(sh, g.get("worksheet", "Transactions"), txns, clf.categories, clf.groups, bals)
+        PUSHED_PATH.parent.mkdir(exist_ok=True)
+        PUSHED_PATH.write_text(json.dumps({t.id: t.category for t in txns}), encoding="utf-8")
         print(f"Synced to Google Sheets: {g['spreadsheet_url']}")
     elif not args.no_sync:
         print("Google sync skipped: set google.spreadsheet_url in config.yaml")

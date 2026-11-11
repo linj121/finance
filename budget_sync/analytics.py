@@ -9,7 +9,12 @@ Rules the formulas follow:
   your accounts, card payments, money paid for others); refunds lower their own category.
 - Net = income - spending; savings rate = net / income, 'N/A' when income is 0.
 - A month that the data doesn't fully cover is labelled partial, never silently compared.
-- An unknown balance shows 'Missing data', never 0."""
+- An unknown balance shows 'Missing data', never 0.
+
+Layout: a scorecard of four habits (savings rate, emergency fund, card interest, net worth
+change) over the last 12 complete months; the picked month vs the one before; spending by
+group; balances; a 12-month trend table. Right side: spending by category and a drill-down.
+Charts: one per habit, all drawn from the trend and category tables."""
 import gspread
 
 ANALYTICS = "Analytics"
@@ -65,131 +70,181 @@ def group_spend(month_cond: str, group_ref: str, divide: int = 1) -> str:
     return f"IFERROR({s}{'/' + str(divide) if divide > 1 else ''},0)"
 
 
-TREND = 49           # first row of the 12-month table
+# ---- Balances tab: month-end rows repeat a balance found on another row (see balances.py)
+BAL_A, BAL_B, BAL_C, BAL_E = "Balances!$A$2:$A", "Balances!$B$2:$B", "Balances!$C$2:$C", "Balances!$E$2:$E"
+NOT_MONTH_END = f'{BAL_E},"<>deposit month-end",{BAL_E},"<>card month-end"'
+
+
+def month_end_sum(d: str, kinds=("deposit month-end", "card month-end")) -> str:
+    return "+".join(f'SUMIFS({BAL_C},{BAL_B},{d},{BAL_E},"{k}")' for k in kinds)
+
+
+LATEST_BALANCES = (f'LET(acc,UNIQUE(FILTER({BAL_A},{BAL_A}<>"")),'
+                   f'd,MAP(acc,LAMBDA(a,MAXIFS({BAL_B},{BAL_A},a,{NOT_MONTH_END}))),'
+                   f'b,MAP(acc,d,LAMBDA(a,x,SUMIFS({BAL_C},{BAL_A},a,{BAL_B},x,{NOT_MONTH_END}))),'
+                   'HSTACK(acc,d,b))')
+
+# ---- layout
+LF = "$I$4"                       # first day of the last complete month
+Y12 = f"({{MONTH}}>=EDATE({LF},-11))*({{MONTH}}<={LF})"   # the 12 complete months up to it
+SC = 9                            # scorecard rows SC .. SC+8
+MO = 21                           # month vs previous month
+GR = 31                           # spending by group
+BAL_ROW = 40                      # balances table (up to 10 accounts)
+TREND = 56                        # first row of the 12-month table
 TREND_END = TREND + 11
-CAT_ROW, CAT_END = 9, 33
-BIG_ROW = 36
-DRILL_ROW = 53
-BAL_ROW = 33
+CAT_ROW, CAT_END = 9, 33          # category table (right side)
+DRILL_ROW = 37
+EF_TARGET = "IFERROR(N('Bills & Goals'!$B$9)/(N('Bills & Goals'!$B$9)>0),3)"   # months; 3 if not set
 
 CELLS = {
     "A1": "Budget overview",
-    "A2": "Pick a month in B4 (first day of the month). Budgets, savings goal and accounts without "
-          "statements are on the Plan tab. Explain any transaction in the Note column of Transactions.",
+    "A2": "The scorecard checks four habits over the last 12 complete months. Pick a month in B4 for the "
+          "month sections; budgets and savings goal are on the Plan tab. Explain any transaction in the "
+          "Note column of Transactions.",
 
-    "A4": "Month", "B4": "=LET(d,$D$4,IF(d=EOMONTH(d,0),EOMONTH(d,-1)+1,EOMONTH(d,-2)+1))",
-    # every account's statements reach at least this date
+    "A4": "Month", "B4": "=$I$4",
+    # every account's data reaches at least this date
     "C4": "Data complete to",
     "D4": f('=IFERROR(MIN(MAP(UNIQUE(FILTER(Balances!$A$2:$A,Balances!$A$2:$A<>"")),'
             'LAMBDA(a,MAXIFS(Balances!$B$2:$B,Balances!$A$2:$A,a)))),MAX({DATE}))'),
     "E4": "Uncategorized", "F4": f('=COUNTIF({CAT},"Uncategorized")'),
+    "H4": "Last complete month", "I4": "=LET(d,$D$4,IF(d=EOMONTH(d,0),EOMONTH(d,-1)+1,EOMONTH(d,-2)+1))",
     "A5": '=IF(EOMONTH($B$4,0)<=$D$4,"Complete month","⚠ Partial month: data only to "'
           '&TEXT($D$4,"yyyy-mm-dd")&", so it is not comparable with a full month")',
 
-    # ---- this month vs last month
-    "A7": "This month vs last month",
-    "B8": '=TEXT($B$4,"yyyy-mm")', "C8": '=TEXT(EDATE($B$4,-1),"yyyy-mm")', "D8": "Change",
-    "A9": "Income", "A10": "Spending", "A11": "Net (income − spending)", "A12": "Savings rate",
-    "A13": "Savings goal", "A14": "Net vs goal",
-    **{f"{c}9": f'=SUMIFS({{AMT}},{{CAT}},"Income",{{MONTH}},{m})' for c, m in (("B", "{M}"), ("C", "{LM}"))},
-    **{f"{c}10": f"=-SUMPRODUCT(({{MONTH}}={m})*{{SPEND}},{{AMT}})" for c, m in (("B", "{M}"), ("C", "{LM}"))},
-    **{f"{c}11": f"={c}9-{c}10" for c in "BC"},
-    **{f'{c}12': f'=IF({c}9=0,"N/A",{c}11/{c}9)' for c in "BC"},
-    **{f"{c}13": f"={P_GOAL}" for c in "BC"},
-    **{f"{c}14": f"={c}11-{c}13" for c in "BC"},
-    "D9": "=B9-C9", "D10": "=B10-C10", "D11": "=B11-C11",
-    "D12": '=IF(OR(B12="N/A",C12="N/A"),"N/A",B12-C12)', "D14": "=B14-C14",
+    # ---- scorecard: one row per principle
+    f"A{SC - 2}": f'="Scorecard: "&TEXT(EDATE({LF},-11),"mmm yyyy")&" to "&TEXT({LF},"mmm yyyy")',
+    **{f"{c}{SC - 1}": h for c, h in zip("ABCDE", ["Measure", "Yours", "Target", "Status", "What it means"])},
+    f"A{SC}": "Income", f"B{SC}": f"=SUMPRODUCT({Y12}*({{CAT}}=\"Income\"),{{AMT}})",
+    f"A{SC + 1}": "Spending", f"B{SC + 1}": f"=-SUMPRODUCT({Y12}*{{SPEND}},{{AMT}})",
+    f"E{SC + 1}": "Fixed + Essential + Optional. Transfers, card payments and money paid for others are left out",
+    f"A{SC + 2}": "1. Savings rate", f"B{SC + 2}": f'=IF(B{SC}=0,"N/A",(B{SC}-B{SC + 1})/B{SC})', f"C{SC + 2}": 0.2,
+    f"D{SC + 2}": f'=IF(ISNUMBER(B{SC + 2}),IF(B{SC + 2}>=C{SC + 2},"✓ On target","⚠ Below target"),"Missing data")',
+    f"E{SC + 2}": "Share of income you kept. Spend less than you earn; 20% or more builds savings steadily",
+    f"A{SC + 3}": "Essential spending per month",
+    f"E{SC + 3}": "Fixed + Essential groups, 12-month average",
+    f"A{SC + 4}": "Cash (chequing + savings)",
+    f"B{SC + 4}": f'=IFERROR(SUM(MAP(UNIQUE(FILTER({BAL_A},{BAL_E}="deposit")),LAMBDA(a,SUMIFS({BAL_C},{BAL_A},a,'
+                  f'{BAL_E},"deposit",{BAL_B},MAXIFS({BAL_B},{BAL_A},a,{BAL_E},"deposit"))))),"Missing data")',
+    f"A{SC + 5}": "2. Emergency fund",
+    f"B{SC + 5}": f'=IF(AND(ISNUMBER(B{SC + 4}),B{SC + 3}>0),B{SC + 4}/B{SC + 3},"Missing data")',
+    f"C{SC + 5}": f"={EF_TARGET}",
+    f"D{SC + 5}": f'=IF(ISNUMBER(B{SC + 5}),IF(B{SC + 5}>=C{SC + 5},"✓ On target","⚠ Below target"),"Missing data")',
+    f"E{SC + 5}": "Months of essential spending your cash would cover. Aim for 3 to 6 (target: Bills & Goals B9)",
+    f"A{SC + 6}": "3. Card interest paid",
+    f"B{SC + 6}": f'=-SUMIFS({{AMT}},{{ACCT}},"*Credit*",{{DESC}},"*INTEREST*",{{MONTH}},">="&EDATE({LF},-11),'
+                  f'{{MONTH}},"<="&{LF})',
+    f"C{SC + 6}": 0,
+    f"D{SC + 6}": f'=IF(B{SC + 6}<=0,"✓ None paid","⚠ Interest paid")',
+    f"E{SC + 6}": "Interest means a card balance was carried. Pay the full statement every month",
+    f"A{SC + 7}": "Net worth now", f"B{SC + 7}": f"=IFERROR(SUM(CHOOSECOLS({LATEST_BALANCES},3)),0)",
+    f"E{SC + 7}": "Latest balance of every account (Balances tab); card debt is negative",
+    f"A{SC + 8}": "4. Net worth change",
+    f"B{SC + 8}": f'=LET(from_end,EOMONTH({LF},-12),to_end,EOMONTH({LF},0),IF(COUNTIFS({BAL_B},from_end,{BAL_E},"deposit month-end")=0,'
+                  f'"Missing data",({month_end_sum("to_end")})-({month_end_sum("from_end")})))',
+    f"C{SC + 8}": "Growing",
+    f"D{SC + 8}": f'=IF(ISNUMBER(B{SC + 8}),IF(B{SC + 8}>0,"✓ Growing","⚠ Shrinking"),"Missing data")',
+    f"E{SC + 8}": "Month-end net worth vs 12 months earlier. Invest what the first three leave over",
 
-    # ---- spending by parent group
-    "A16": "Spending by group",
-    "A17": "Group", "B17": "This month", "C17": "Last month", "D17": "3-month avg", "E17": "Budget",
-    "F17": "Remaining",
-    **{f"A{18 + i}": g for i, g in enumerate(SPENDING_GROUPS)},
+    # ---- the picked month vs the one before
+    f"A{MO - 1}": '="Month: "&TEXT($B$4,"mmmm yyyy")&" vs the month before"',
+    f"B{MO}": '=TEXT($B$4,"yyyy-mm")', f"C{MO}": '=TEXT(EDATE($B$4,-1),"yyyy-mm")', f"D{MO}": "Change",
+    f"A{MO + 1}": "Income", f"A{MO + 2}": "Spending", f"A{MO + 3}": "Net (income − spending)",
+    f"A{MO + 4}": "Savings rate", f"A{MO + 5}": "Savings goal (Plan)", f"A{MO + 6}": "Net vs goal",
+    **{f"{c}{MO + 1}": f'=SUMIFS({{AMT}},{{CAT}},"Income",{{MONTH}},{m})' for c, m in (("B", "{M}"), ("C", "{LM}"))},
+    **{f"{c}{MO + 2}": f"=-SUMPRODUCT(({{MONTH}}={m})*{{SPEND}},{{AMT}})" for c, m in (("B", "{M}"), ("C", "{LM}"))},
+    **{f"{c}{MO + 3}": f"={c}{MO + 1}-{c}{MO + 2}" for c in "BC"},
+    **{f"{c}{MO + 4}": f'=IF({c}{MO + 1}=0,"N/A",{c}{MO + 3}/{c}{MO + 1})' for c in "BC"},
+    **{f"{c}{MO + 5}": f"={P_GOAL}" for c in "BC"},
+    **{f"{c}{MO + 6}": f"={c}{MO + 3}-{c}{MO + 5}" for c in "BC"},
+    **{f"D{MO + i}": f"=B{MO + i}-C{MO + i}" for i in (1, 2, 3, 6)},
+    f"D{MO + 4}": f'=IF(OR(B{MO + 4}="N/A",C{MO + 4}="N/A"),"N/A",B{MO + 4}-C{MO + 4})',
+
+    # ---- spending by parent group for the picked month
+    f"A{GR - 1}": "Spending by group",
+    **{f"{c}{GR}": h for c, h in zip("ABCDEF", ["Group", "This month", "Last month", "3-month avg", "Budget",
+                                               "Remaining"])},
+    **{f"A{GR + 1 + i}": g for i, g in enumerate(SPENDING_GROUPS)},
     **{k: v for i in range(len(SPENDING_GROUPS)) for k, v in {
-        f"B{18 + i}": "=" + group_spend("{MONTH}={M}", f"$A{18 + i}"),
-        f"C{18 + i}": "=" + group_spend("{MONTH}={LM}", f"$A{18 + i}"),
-        f"D{18 + i}": "=" + group_spend("({MONTH}>=EDATE({M},-3))*({MONTH}<{M})", f"$A{18 + i}", 3),
-        f"E{18 + i}": f"=IFERROR(SUMPRODUCT(ISNUMBER(MATCH({P_CAT},FILTER({{CATS}},{{GRP}}=$A{18 + i}),0))"
-                      f"*{P_BUDGET}),0)",
-        f"F{18 + i}": f'=IF(E{18 + i}=0,"",E{18 + i}-B{18 + i})',
+        f"B{GR + 1 + i}": "=" + group_spend("{MONTH}={M}", f"$A{GR + 1 + i}"),
+        f"C{GR + 1 + i}": "=" + group_spend("{MONTH}={LM}", f"$A{GR + 1 + i}"),
+        f"D{GR + 1 + i}": "=" + group_spend("({MONTH}>=EDATE({M},-3))*({MONTH}<{M})", f"$A{GR + 1 + i}", 3),
+        f"E{GR + 1 + i}": f"=IFERROR(SUMPRODUCT(ISNUMBER(MATCH({P_CAT},FILTER({{CATS}},{{GRP}}=$A{GR + 1 + i}),0))"
+                          f"*{P_BUDGET}),0)",
+        f"F{GR + 1 + i}": f'=IF(E{GR + 1 + i}=0,"",E{GR + 1 + i}-B{GR + 1 + i})',
     }.items()},
-    "A22": "Total", **{f"{c}22": f"=SUM({c}18:{c}21)" for c in "BCDE"}, "F22": '=IF(E22=0,"",E22-B22)',
+    f"A{GR + 5}": "Total", **{f"{c}{GR + 5}": f"=SUM({c}{GR + 1}:{c}{GR + 4})" for c in "BCDE"},
+    f"F{GR + 5}": f'=IF(E{GR + 5}=0,"",E{GR + 5}-B{GR + 5})',
 
-    # ---- balances and net worth
-    "A24": "Balances & net worth",
-    "A25": "Assets", "B25": f"=SUMIF(C{BAL_ROW}:C{BAL_ROW + 12},\">0\")",
-    "A26": "Debts", "B26": f"=SUMIF(C{BAL_ROW}:C{BAL_ROW + 12},\"<0\")",
-    "A27": "Owed to me", "B27": f'=-SUMIFS({{AMT}},{{CAT}},"Paid for others",{{DATE}},">="&{P_SINCE})-{P_SETTLED}',
-    "C27": f'="Paid for others since "&TEXT({P_SINCE},"yyyy-mm-dd")&", minus repaid outside (Plan)"',
-    "A28": "Net worth", "B28": "=B25+B26+B27",
-    "A29": f'=IFERROR("⚠ Missing data, not included: "&TEXTJOIN(", ",TRUE,FILTER({P_ACCT},{P_ACCT}<>"",'
-           f'{P_BAL}="")),"")',
-    "A30": "Each balance is as of its own statement date; the dates don't line up exactly.",
+    # ---- latest balances, plus accounts you track by hand on Plan
+    f"A{BAL_ROW - 2}": "Balances",
     f"A{BAL_ROW - 1}": "Account", f"B{BAL_ROW - 1}": "As of", f"C{BAL_ROW - 1}": "Balance",
-    f"A{BAL_ROW}": f'=ARRAYFORMULA(LET(acc,UNIQUE(FILTER(Balances!$A$2:$A,Balances!$A$2:$A<>"")),'
-                   'd,MAP(acc,LAMBDA(a,MAXIFS(Balances!$B$2:$B,Balances!$A$2:$A,a))),'
-                   'b,MAP(acc,d,LAMBDA(a,x,SUMIFS(Balances!$C$2:$C,Balances!$A$2:$A,a,Balances!$B$2:$B,x))),'
-                   'stm,HSTACK(acc,d,b),'
+    f"D{BAL_ROW - 1}": "Each balance is as of its own date; they don't line up exactly",
+    f"A{BAL_ROW}": f'=ARRAYFORMULA(LET(stm,{LATEST_BALANCES},'
                    f'IFERROR(VSTACK(stm,FILTER(HSTACK({P_ACCT},IF({P_ASOF}="","—",{P_ASOF}),'
                    f'IF({P_BAL}="","Missing data",{P_BAL})),{P_ACCT}<>"")),stm)))',
+    f"A{BAL_ROW + 11}": "Owed to me",
+    f"B{BAL_ROW + 11}": f'=-SUMIFS({{AMT}},{{CAT}},"Paid for others",{{DATE}},">="&{P_SINCE})-{P_SETTLED}',
+    f"C{BAL_ROW + 11}": f'="Paid for others since "&TEXT({P_SINCE},"yyyy-mm-dd")&", minus repaid outside '
+                        f'(Plan). Not in net worth"',
 
-    # ---- 12-month trend
+    # ---- 12-month trend (feeds the charts)
     f"A{TREND - 2}": "Last 12 months",
-    **{f"{c}{TREND - 1}": h for c, h in zip("ABCDEFGHI", [
-        "Month", "Income", "Spending", "Net", "Savings rate", "Fixed", "Essential", "Optional", "Status"])},
+    **{f"{c}{TREND - 1}": h for c, h in zip("ABCDEFGHIJKL", [
+        "Month", "Income", "Spending", "Net", "Savings rate", "Fixed", "Essential", "Optional",
+        "Cash (month end)", "Emergency target", "Net worth (month end)", "Status"])},
     f"A{TREND}": "=MAP(SEQUENCE(12,1,-11),LAMBDA(k,EDATE(EOMONTH($D$4,-1)+1,k)))",
 }
 _M = f"A{TREND}:A{TREND_END}"
-_NODATA = f"m<EOMONTH(MIN({{DATE}}),-1)+1"
+_NODATA = "m<EOMONTH(MIN({DATE}),-1)+1"
 CELLS.update({
-    f"B{TREND}": f(f'=MAP({_M},LAMBDA(m,IF({_NODATA},"",SUMIFS({{AMT}},{{CAT}},"Income",{{MONTH}},m))))'),
-    f"C{TREND}": f(f'=MAP({_M},LAMBDA(m,IF({_NODATA},"",-SUMPRODUCT(({{MONTH}}=m)*{{SPEND}},{{AMT}}))))'),
+    f"B{SC + 3}": "=(" + group_spend(Y12, '"Fixed"') + "+" + group_spend(Y12, '"Essential"') + ")/12",
+    f"B{TREND}": f'=MAP({_M},LAMBDA(m,IF({_NODATA},"",SUMIFS({{AMT}},{{CAT}},"Income",{{MONTH}},m))))',
+    f"C{TREND}": f'=MAP({_M},LAMBDA(m,IF({_NODATA},"",-SUMPRODUCT(({{MONTH}}=m)*{{SPEND}},{{AMT}}))))',
     f"D{TREND}": f'=MAP({_M},B{TREND}:B{TREND_END},C{TREND}:C{TREND_END},LAMBDA(m,i,s,IF(i="","",i-s)))',
     f"E{TREND}": f'=MAP(B{TREND}:B{TREND_END},D{TREND}:D{TREND_END},LAMBDA(i,n,IF(i="","",IF(i=0,"N/A",n/i))))',
-    **{f"{c}{TREND}": f(f'=MAP({_M},LAMBDA(m,IF({_NODATA},"",{group_spend("{MONTH}=m", chr(34) + g + chr(34))})))')
+    **{f"{c}{TREND}": f'=MAP({_M},LAMBDA(m,IF({_NODATA},"",{group_spend("{MONTH}=m", chr(34) + g + chr(34))})))'
        for c, g in zip("FGH", ["Fixed", "Essential", "Optional"])},
-    f"I{TREND}": f(f'=MAP({_M},LAMBDA(m,IF({_NODATA},"No data",IF(EOMONTH(m,0)>$D$4,'
-                   f'"Partial (to "&TEXT($D$4,"mm-dd")&")",IF(m<MIN({{DATE}}),'
-                   f'"Partial (from "&TEXT(MIN({{DATE}}),"mm-dd")&")","")))))'),
+    # blank (a gap in the chart) when a month has no month-end balance yet
+    f"I{TREND}": f'=MAP({_M},LAMBDA(m,LET(e,EOMONTH(m,0),IF(COUNTIFS({BAL_B},e,{BAL_E},"deposit month-end")=0,"",'
+                 f'{month_end_sum("e", ("deposit month-end",))}))))',
+    f"J{TREND}": f'=MAP(I{TREND}:I{TREND_END},LAMBDA(c,IF(c="","",IFERROR($C${SC + 5}*$B${SC + 3},""))))',
+    f"K{TREND}": f'=MAP({_M},LAMBDA(m,LET(e,EOMONTH(m,0),IF(COUNTIFS({BAL_B},e,{BAL_E},"deposit month-end")=0,"",'
+                 f'{month_end_sum("e")}))))',
+    f"L{TREND}": f'=MAP({_M},LAMBDA(m,IF({_NODATA},"No data",IF(EOMONTH(m,0)>$D$4,'
+                 f'"Partial (to "&TEXT($D$4,"mm-dd")&")",IF(m<MIN({{DATE}}),'
+                 f'"Partial (from "&TEXT(MIN({{DATE}}),"mm-dd")&")","")))))',
 
-    # ---- budget by category for the month
-    "K7": '="Budget by category, "&TEXT($B$4,"yyyy-mm")',
-    **{f"{c}8": h for c, h in zip("KLMNOPQRSTU", [
-        "Category", "Group", "Budget", "Spent", "Remaining", "% used", "Share", "# txns",
-        "Last month", "3-month avg", "vs 3-month avg"])},
-    f"K{CAT_ROW}": f(
+    # ---- spending by category: last 12 months, and the picked month against its budget
+    "N7": f'="Spending by category, "&TEXT(EDATE({LF},-11),"mmm yyyy")&" to "&TEXT({LF},"mmm yyyy")',
+    **{f"{c}8": h for c, h in zip("NOPQRSTU", [
+        "Category", "Group", "Last 12 months", "Per month", "Share", "Picked month", "Budget", "Remaining"])},
+    f"N{CAT_ROW}": (
         '=LET(cats,FILTER({CATS},{GRP}<>"Not spending",{CATS}<>""),'
         'grp,MAP(cats,LAMBDA(c,XLOOKUP(c,{CATS},{GRP}))),'
-        f'bud,MAP(cats,LAMBDA(c,IF(COUNTIFS({P_CAT},c,{P_BUDGET},"<>")=0,"",SUMIFS({P_BUDGET},{P_CAT},c)))),'
+        f'y,MAP(cats,LAMBDA(c,-SUMIFS({{AMT}},{{CAT}},c,{{MONTH}},">="&EDATE({LF},-11),{{MONTH}},"<="&{LF}))),'
+        'pm,MAP(y,LAMBDA(v,v/12)),'
+        'tot,SUM(y),'
+        'shr,MAP(y,LAMBDA(v,IF(tot=0,0,v/tot))),'
         'sp,MAP(cats,LAMBDA(c,-SUMIFS({AMT},{CAT},c,{MONTH},{M}))),'
-        'tot,SUM(sp),'
+        f'bud,MAP(cats,LAMBDA(c,IF(COUNTIFS({P_CAT},c,{P_BUDGET},"<>")=0,"",SUMIFS({P_BUDGET},{P_CAT},c)))),'
         'rem,MAP(bud,sp,LAMBDA(b,s,IF(b="","",b-s))),'
-        'pct,MAP(bud,sp,LAMBDA(b,s,IF(b="","",IF(b=0,"",s/b)))),'
-        'shr,MAP(sp,LAMBDA(s,IF(tot=0,0,s/tot))),'
-        'n,MAP(cats,LAMBDA(c,COUNTIFS({CAT},c,{MONTH},{M}))),'
-        'lm,MAP(cats,LAMBDA(c,-SUMIFS({AMT},{CAT},c,{MONTH},{LM}))),'
-        'av,MAP(cats,LAMBDA(c,-SUMIFS({AMT},{CAT},c,{MONTH},">="&EDATE({M},-3),{MONTH},"<"&{M})/3)),'
-        'dv,MAP(sp,av,LAMBDA(s,a,s-a)),'
-        'SORT(HSTACK(cats,grp,bud,sp,rem,pct,shr,n,lm,av,dv),4,FALSE))'),
+        'SORT(HSTACK(cats,grp,y,pm,shr,sp,bud,rem),3,FALSE))'),
 
-    # ---- largest expenses of the month
-    f"K{BIG_ROW - 2}": '="Largest expenses, "&TEXT($B$4,"yyyy-mm")',
-    **{f"{c}{BIG_ROW - 1}": h for c, h in zip("KLMNO", ["Description", "Date", "Category", "Amount", "Note"])},
-    f"K{BIG_ROW}": f('=ARRAYFORMULA(IFERROR(SORTN(FILTER(HSTACK({DESC},{DATE},{CAT},-{AMT},{NOTE}),'
-                     '{MONTH}={M},{AMT}<0,{SPEND}),15,0,4,FALSE),"No spending this month"))'),
-
-    # ---- drill-down: every transaction of one category in the month
-    f"K{DRILL_ROW - 1}": "Transactions in category (pick one) →",
-    f"L{DRILL_ROW - 1}": "Dining",
-    f"M{DRILL_ROW - 1}": '="in "&TEXT($B$4,"yyyy-mm")',
-    **{f"{c}{DRILL_ROW}": h for c, h in zip("KLMNO", ["Description", "Date", "Account", "Amount", "Note"])},
-    f"K{DRILL_ROW + 1}": f(f'=IFERROR(SORT(FILTER(HSTACK({{DESC}},{{DATE}},{{ACCT}},{{AMT}},{{NOTE}}),'
-                           f'{{CAT}}=$L${DRILL_ROW - 1},{{MONTH}}={{M}}),2,TRUE),"No transactions")'),
+    # ---- drill-down: every transaction of one category in the picked month
+    f"N{DRILL_ROW - 1}": "Transactions in category (pick one) →",
+    f"O{DRILL_ROW - 1}": "Dining",
+    f"P{DRILL_ROW - 1}": '="in "&TEXT($B$4,"yyyy-mm")',
+    **{f"{c}{DRILL_ROW}": h for c, h in zip("NOPQR", ["Description", "Date", "Account", "Amount", "Note"])},
+    f"N{DRILL_ROW + 1}": (f'=IFERROR(SORT(FILTER(HSTACK({{DESC}},{{DATE}},{{ACCT}},{{AMT}},{{NOTE}}),'
+                          f'{{CAT}}=$O${DRILL_ROW - 1},{{MONTH}}={{M}}),2,TRUE),"No transactions")'),
 })
 CELLS = {k: f(v) if isinstance(v, str) else v for k, v in CELLS.items()}
 
 MONEY = {"type": "CURRENCY", "pattern": "$#,##0;-$#,##0"}
 PCT = {"type": "PERCENT", "pattern": "0%"}
+MONTHS_FMT = {"type": "NUMBER", "pattern": '0.0 "months"'}
 MONTH_FMT = {"type": "DATE", "pattern": "yyyy-mm"}
 DAY_FMT = {"type": "DATE", "pattern": "yyyy-mm-dd"}
 
@@ -256,69 +311,77 @@ def build(sh: gspread.Spreadsheet, groups: dict[str, str]) -> bool:
     a, c = ws.id, charts.id
     bold = {"textFormat": {"bold": True}}
     section = {"textFormat": {"bold": True, "fontSize": 12}}
+    muted = {"textFormat": {"italic": True, "foregroundColor": _rgb(INK_MUTED)}}
+    sc_end = SC + 8
     reqs = [
         _fmt(a, "A1", {"textFormat": {"bold": True, "fontSize": 16}}, "textFormat"),
-        _fmt(a, "A2", {"textFormat": {"italic": True, "foregroundColor": _rgb(INK_MUTED)}}, "textFormat"),
-        _fmt(a, "A30", {"textFormat": {"italic": True, "foregroundColor": _rgb(INK_MUTED)}}, "textFormat"),
+        _fmt(a, "A2", muted, "textFormat"),
+        _fmt(a, f"E{SC}:E{sc_end}", muted, "textFormat"),
+        _fmt(a, f"D{BAL_ROW - 1}", muted, "textFormat"),
+        _fmt(a, f"C{BAL_ROW + 11}", muted, "textFormat"),
         *[_fmt(a, r, section, "textFormat") for r in (
-            "A7", "A16", "A24", f"A{TREND - 2}", "K7", f"K{BIG_ROW - 2}", f"K{DRILL_ROW - 1}")],
+            f"A{SC - 2}", f"A{MO - 1}", f"A{GR - 1}", f"A{BAL_ROW - 2}", f"A{TREND - 2}", "N7", f"N{DRILL_ROW - 1}")],
         *[_fmt(a, r, bold, "textFormat") for r in (
-            "A4", "C4", "E4", "A5", "B8:D8", "A17:F17", "A22:F22", "A28:B28", f"A{BAL_ROW - 1}:C{BAL_ROW - 1}",
-            f"A{TREND - 1}:I{TREND - 1}", "K8:U8", f"K{BIG_ROW - 1}:O{BIG_ROW - 1}", f"K{DRILL_ROW}:O{DRILL_ROW}")],
+            "A4", "C4", "E4", "H4", "A5", f"A{SC - 1}:E{SC - 1}", f"A{SC + 2}:A{sc_end}",
+            f"B{MO}:D{MO}", f"A{GR}:F{GR}", f"A{GR + 5}:F{GR + 5}", f"A{BAL_ROW - 1}:C{BAL_ROW - 1}",
+            f"A{TREND - 1}:L{TREND - 1}", "N8:U8", f"N{DRILL_ROW}:R{DRILL_ROW}")],
         _fmt(a, "B4", {"numberFormat": MONTH_FMT, "backgroundColor": _rgb(INPUT_BG)}, "numberFormat,backgroundColor"),
-        _fmt(a, f"L{DRILL_ROW - 1}", {"backgroundColor": _rgb(INPUT_BG)}, "backgroundColor"),
+        _fmt(a, f"O{DRILL_ROW - 1}", {"backgroundColor": _rgb(INPUT_BG)}, "backgroundColor"),
         _fmt(a, "D4", {"numberFormat": DAY_FMT}, "numberFormat"),
-        _fmt(a, "B9:D11", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, "B12:D12", {"numberFormat": PCT}, "numberFormat"),
-        _fmt(a, "B13:D14", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, "B18:F22", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, "B25:B28", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, f"B{BAL_ROW}:B{BAL_ROW + 12}", {"numberFormat": DAY_FMT}, "numberFormat"),
-        _fmt(a, f"C{BAL_ROW}:C{BAL_ROW + 12}", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, "I4", {"numberFormat": MONTH_FMT}, "numberFormat"),
+        # scorecard
+        _fmt(a, f"B{SC}:C{sc_end}", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, f"B{SC + 2}:C{SC + 2}", {"numberFormat": PCT}, "numberFormat"),
+        _fmt(a, f"B{SC + 5}:C{SC + 5}", {"numberFormat": MONTHS_FMT}, "numberFormat"),
+        _fmt(a, f"B{SC}:D{sc_end}", {"horizontalAlignment": "RIGHT"}, "horizontalAlignment"),
+        # month vs month, groups, balances
+        _fmt(a, f"B{MO + 1}:D{MO + 3}", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, f"B{MO + 4}:D{MO + 4}", {"numberFormat": PCT}, "numberFormat"),
+        _fmt(a, f"B{MO + 5}:D{MO + 6}", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, f"B{GR + 1}:F{GR + 5}", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, f"B{BAL_ROW}:B{BAL_ROW + 9}", {"numberFormat": DAY_FMT}, "numberFormat"),
+        _fmt(a, f"C{BAL_ROW}:C{BAL_ROW + 9}", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, f"B{BAL_ROW + 11}", {"numberFormat": MONEY}, "numberFormat"),
+        # trend
         _fmt(a, f"A{TREND}:A{TREND_END}", {"numberFormat": MONTH_FMT, "horizontalAlignment": "LEFT"},
              "numberFormat,horizontalAlignment"),
         _fmt(a, f"B{TREND}:D{TREND_END}", {"numberFormat": MONEY}, "numberFormat"),
         _fmt(a, f"E{TREND}:E{TREND_END}", {"numberFormat": PCT}, "numberFormat"),
-        _fmt(a, f"F{TREND}:H{TREND_END}", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, f"M{CAT_ROW}:O{CAT_END}", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, f"P{CAT_ROW}:Q{CAT_END}", {"numberFormat": PCT}, "numberFormat"),
+        _fmt(a, f"F{TREND}:K{TREND_END}", {"numberFormat": MONEY}, "numberFormat"),
+        # categories and drill-down
+        _fmt(a, f"P{CAT_ROW}:Q{CAT_END}", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, f"R{CAT_ROW}:R{CAT_END}", {"numberFormat": PCT}, "numberFormat"),
         _fmt(a, f"S{CAT_ROW}:U{CAT_END}", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, f"L{BIG_ROW}:L{BIG_ROW + 14}", {"numberFormat": DAY_FMT}, "numberFormat"),
-        _fmt(a, f"N{BIG_ROW}:N{BIG_ROW + 14}", {"numberFormat": MONEY}, "numberFormat"),
-        _fmt(a, f"L{DRILL_ROW + 1}:L250", {"numberFormat": DAY_FMT}, "numberFormat"),
-        _fmt(a, f"N{DRILL_ROW + 1}:N250", {"numberFormat": MONEY}, "numberFormat"),
+        _fmt(a, f"O{DRILL_ROW + 1}:O250", {"numberFormat": DAY_FMT}, "numberFormat"),
+        _fmt(a, f"Q{DRILL_ROW + 1}:Q250", {"numberFormat": MONEY}, "numberFormat"),
         # month picker: any month in the trend table; category picker: any category
         {"setDataValidation": {"range": _grid(a, "B4"), "rule": {
             "condition": {"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": f"=$A${TREND}:$A${TREND_END}"}]},
             "showCustomUi": True, "strict": False}}},
-        {"setDataValidation": {"range": _grid(a, f"L{DRILL_ROW - 1}"), "rule": {
+        {"setDataValidation": {"range": _grid(a, f"O{DRILL_ROW - 1}"), "rule": {
             "condition": {"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": "=Categories!$A$2:$A"}]},
             "showCustomUi": True, "strict": True}}},
-        # budget use: over / close / fine (only where a budget is set)
-        _when(a, f"P{CAT_ROW}:P{CAT_END}", f'=AND(ISNUMBER($P{CAT_ROW}),$P{CAT_ROW}>1)', OVER_BG),
-        _when(a, f"P{CAT_ROW}:P{CAT_END}", f'=AND(ISNUMBER($P{CAT_ROW}),$P{CAT_ROW}>=0.8)', WARN_BG, 1),
-        _when(a, f"P{CAT_ROW}:P{CAT_END}", f'=ISNUMBER($P{CAT_ROW})', GOOD_BG, 2),
-        _when(a, "F18:F22", "=AND(ISNUMBER(F18),F18<0)", OVER_BG),
-        # well above its own recent level: a fact to look at, not a verdict
-        _when(a, f"U{CAT_ROW}:U{CAT_END}",
-              f"=AND(ISNUMBER($U{CAT_ROW}),$U{CAT_ROW}>100,$U{CAT_ROW}>0.5*$T{CAT_ROW})", NOTE_BG),
+        # status: the ✓ / ⚠ text carries the meaning; the fill only repeats it
+        _when(a, f"D{SC}:D{sc_end}", f'=LEFT($D{SC},1)="✓"', GOOD_BG),
+        _when(a, f"D{SC}:D{sc_end}", f'=OR(LEFT($D{SC},1)="⚠",$D{SC}="Missing data")', WARN_BG, 1),
+        _when(a, f"U{CAT_ROW}:U{CAT_END}", f"=AND(ISNUMBER($U{CAT_ROW}),$U{CAT_ROW}<0)", OVER_BG),
+        _when(a, f"F{GR + 1}:F{GR + 5}", f"=AND(ISNUMBER(F{GR + 1}),F{GR + 1}<0)", OVER_BG),
         _when(a, "A5", '=LEFT($A$5,1)="⚠"', WARN_BG),
-        _when(a, f"I{TREND}:I{TREND_END}", f'=I{TREND}<>""', WARN_BG),
-        _when(a, f"C{BAL_ROW}:C{BAL_ROW + 12}", f'=C{BAL_ROW}="Missing data"', WARN_BG),
-        _when(a, "A29", '=A29<>""', WARN_BG),
-        _width(a, 0, 0, 190), _width(a, 1, 8, 105), _width(a, 9, 9, 30),
-        _width(a, 10, 10, 280), _width(a, 11, 20, 95),
+        _when(a, f"L{TREND}:L{TREND_END}", f'=L{TREND}<>""', WARN_BG),
+        _when(a, f"C{BAL_ROW}:C{BAL_ROW + 9}", f'=C{BAL_ROW}="Missing data"', WARN_BG),
+        _width(a, 0, 0, 220), _width(a, 1, 3, 110), _width(a, 4, 4, 120), _width(a, 5, 11, 105),
+        _width(a, 12, 12, 30), _width(a, 13, 13, 280), _width(a, 14, 20, 105),
         {"updateSheetProperties": {"properties": {"sheetId": a, "gridProperties": {"frozenRowCount": 5}},
                                    "fields": "gridProperties.frozenRowCount"}},
-        _chart(c, a, "Income vs spending, last 12 months", "COLUMN", f"A{TREND - 1}:A{TREND_END}",
+        # one chart per principle, all from the trend and category tables
+        _chart(c, a, "1. Income vs spending per month", "COLUMN", f"A{TREND - 1}:A{TREND_END}",
                [(f"B{TREND - 1}:B{TREND_END}", BLUE), (f"C{TREND - 1}:C{TREND_END}", ORANGE)], 0, 0, legend=True),
-        _chart(c, a, "Net (income − spending) by month", "COLUMN", f"A{TREND - 1}:A{TREND_END}",
-               [(f"D{TREND - 1}:D{TREND_END}", BLUE)], 0, 9),
-        _chart(c, a, "Spending by group per month", "COLUMN", f"A{TREND - 1}:A{TREND_END}",
-               [(f"F{TREND - 1}:F{TREND_END}", BLUE), (f"G{TREND - 1}:G{TREND_END}", TEAL),
-                (f"H{TREND - 1}:H{TREND_END}", ORANGE)], 21, 0, legend=True, stacked=True),
-        _chart(c, a, "Spending by category, selected month", "BAR", f"K8:K{CAT_END}",
-               [(f"N8:N{CAT_END}", BLUE)], 21, 9, height=520),
+        _chart(c, a, "2. Cash at month end vs emergency-fund target", "LINE", f"A{TREND - 1}:A{TREND_END}",
+               [(f"I{TREND - 1}:I{TREND_END}", BLUE), (f"J{TREND - 1}:J{TREND_END}", INK_MUTED)], 0, 9, legend=True),
+        _chart(c, a, "3. Spending by category, last 12 months", "BAR", f"N8:N{CAT_END}",
+               [(f"P8:P{CAT_END}", BLUE)], 21, 0, height=520),
+        _chart(c, a, "4. Net worth at month end", "LINE", f"A{TREND - 1}:A{TREND_END}",
+               [(f"K{TREND - 1}:K{TREND_END}", BLUE)], 21, 9),
     ]
     sh.batch_update({"requests": reqs})
     return plan_created
