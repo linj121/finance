@@ -1,6 +1,6 @@
 # Budget sync
 
-Reads bank statements (PDF or CSV) → merges them into one table → assigns a category to
+Reads bank CSV exports → merges them into one table → assigns a category to
 each transaction → writes `transactions.csv` locally and syncs it to the **Transactions**
 tab of a Google Sheet. Put your analysis/budget tabs in the same spreadsheet; they
 are never overwritten.
@@ -10,17 +10,34 @@ are never overwritten.
 Double-click `run.bat`, or:
 
 ```
-.venv\Scripts\python -m budget_sync run            # parse, categorize, sync
+.venv\Scripts\python -m budget_sync run            # read CSVs, categorize, sync
 .venv\Scripts\python -m budget_sync run --no-sync  # local only
 .venv\Scripts\python -m budget_sync run --no-ai    # don't call Claude
 .venv\Scripts\python -m budget_sync run --reclassify   # after editing rules.yaml
 .venv\Scripts\python -m budget_sync run --overwrite    # restore the sheet from transactions.csv, discarding sheet edits
-.venv\Scripts\python -m budget_sync inspect <file.pdf> # debug a statement that parses wrong
 .venv\Scripts\python -m budget_sync analytics          # rebuild the Analytics + Charts tabs (discards edits on them)
 ```
 
-Statements are read from `statements_dir` in `config.yaml` (subfolders included).
-Re-running is safe: transactions get stable IDs, so nothing is duplicated.
+## Data
+
+All private data lives in `data\` (git-ignored, never pushed). Every `*.csv` under it,
+subfolders included, is read; a file is recognised by its columns, so names and folders
+are up to you (e.g. `data\rbc\debit\download-transactions.csv`). Download from RBC Online
+Banking → Account Services → Download (CSV). Downloads may overlap: a transaction found in
+several files is counted once. Re-running is safe: transactions get stable IDs.
+
+Bank CSVs have no balances, so put them in `data\balances.csv`:
+
+```
+Account,As of,Balance,Kind,Min Payment,Due Date,Credit Limit,Interest Rate
+RBC Chequing ...0177,2026-10-15,1109.68,deposit,,,,
+RBC Credit ...3503,2026-09-28,-967.12,card,10.00,2026-10-19,2500.00,20.99
+```
+
+Balance is at the end of the As of day; card debt is negative. A bank account's latest
+balance is rolled forward through later transactions, so one entry stays current as you
+download new CSVs. Update a card row from each new card statement (Outlook pays that
+statement's balance). Account names are `RBC <Chequing|Saving|Credit> ...<last 4 digits>`.
 
 ## Categories
 
@@ -44,7 +61,7 @@ income and spending). Every category must be in exactly one group.
 |---|---|---|
 | Transactions | every run | all transactions. Edit **Category** (dropdown) or **Note**; both are kept |
 | Categories | every run | category list and its group |
-| Balances | every run | each statement's closing balance (card debt is negative) |
+| Balances | every run | rows of `data\balances.csv`, plus each bank account's balance rolled forward to its latest transaction (card debt is negative) |
 | Plan | created once by `analytics`, then **never overwritten** | your budgets, savings goal, accounts without statements |
 | Analytics, Charts | `analytics` (rebuilt, edits discarded) | live formulas: month vs last month, groups, budget by category, largest expenses, drill-down, 12-month trend, balances and net worth |
 | Bills & Goals | created once by `analytics`, then **never overwritten** | recurring income and bills (pre-filled with suggestions from your history, unconfirmed), one-off costs to save for, savings goals, emergency-fund settings |
@@ -58,22 +75,8 @@ category". A month the data doesn't fully cover is labelled partial; an account 
 with no balance shows "Missing data" and is left out of net worth. To start Plan over,
 delete the tab and run `analytics`.
 
-Every PDF statement is checked: opening balance + parsed transactions must equal the
-closing balance, or the file is reported and skipped.
-
-## Cache
-
-Parsed statements are cached in `.cache\`. A statement is re-read only when the file
-changes (size or modified time) or the parser code changes, so a normal run takes
-about a second instead of a minute.
-
-```
-.venv\Scripts\python -m budget_sync run --force     # re-read every statement and re-categorize
-                                                    # every record (manual edits are kept)
-.venv\Scripts\python -m budget_sync clear-cache     # delete the cache; next run re-reads everything
-```
-`--force` and `clear-cache` don't re-ask Claude: remembered answers in
-`category_memory.json` are reused. Delete that file to have Claude categorize from scratch.
+`--reclassify` doesn't re-ask Claude: remembered answers in `category_memory.json` are
+reused. Delete that file to have Claude categorize from scratch.
 
 ## One-time setup
 
@@ -92,5 +95,5 @@ Model and effort are in `config.yaml`.
 5. Paste the spreadsheet URL into `google.spreadsheet_url` in `config.yaml`.
 
 ## Adding a bank
-Add a module in `budget_sync/parsers/` with `detect()` and `parse()` and list it in
-`parsers/__init__.py`. `inspect` shows the raw text pdfplumber extracts.
+Add a module in `budget_sync/parsers/` with `detect(header)` (does this CSV's column list
+belong to that bank?) and `parse(path, source)`, and list it in `parsers/__init__.py`.
