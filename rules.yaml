@@ -17,18 +17,34 @@ categories:
   Subscriptions: streaming, software, memberships
   Travel: flights, hotels, Airbnb, travel bookings
   Education: tuition, courses, books
+  Immigration: immigration consultant / lawyer, IRCC application and permit fees, biometrics
   Kids: childcare, kids activities
   Gifts & Donations: gifts, charity
   Fees & Interest: bank fees, card interest, NSF, annual fees
   Investments: transfers to brokerage, RRSP, TFSA contributions
   Transfer: moving money between your own accounts, e-Transfers to self
   Credit Card Payment: paying off a credit card (exclude from spending)
+  Paid for others: something you paid on someone else's behalf (their tuition, their car rental) and their repayment of it (exclude from spending)
+  Shared costs: e-Transfers to/from friends settling shared meals, shopping, outings (counts as spending; money back lowers it)
   Cash: ATM withdrawals
   Other: anything that fits nowhere else
   Uncategorized: not yet categorized
 
+# Parent group of each category. Every category above must be in exactly one group.
+#   Fixed: the same every month, committed in advance
+#   Essential: needed, but the amount varies
+#   Optional: discretionary, the first place to cut
+#   Not spending: left out of income and spending totals (Income is counted as income)
+groups:
+  Fixed: [Housing, Phone & Internet, Insurance, Subscriptions, Car]
+  Essential: [Groceries, Utilities, Transportation, Fuel, Health, Education, Immigration, Kids, Fees & Interest]
+  Optional: [Dining, Shopping, Entertainment, Travel, Gifts & Donations, Shared costs, Cash, Other]
+  Not spending: [Income, Transfer, Credit Card Payment, Paid for others, Investments]
+  Uncategorized: [Uncategorized]
+
 # Rules: first match wins. 'match' is a case-insensitive substring,
 # or a regex when prefixed with 're:'. Rules beat Claude's guesses.
+# Optional 'min_amount': the rule only applies when the amount (either sign) is at least this.
 rules:
   - {match: "PAYMENT - THANK YOU", category: Credit Card Payment}
   - {match: "re:^PAYMENT THANK YOU|PAIEMENT MERCI", category: Credit Card Payment}
@@ -36,9 +52,36 @@ rules:
   - {match: "AUTOMATIC PAYMENT", category: Credit Card Payment}
   - {match: "RBC CREDIT CARD", category: Credit Card Payment}
   - {match: "Payroll", category: Income}
+  - {match: "Deposit interest", category: Income}   # also "Bonus deposit interest"
   - {match: "ATM withdrawal", category: Cash}
   - {match: "Monthly fee", category: Fees & Interest}
   - {match: "PURCHASE INTEREST", category: Fees & Interest}
   - {match: "PRESTO", category: Transportation}
   - {match: "NETFLIX", category: Subscriptions}
   - {match: "SPOTIFY", category: Subscriptions}
+
+  # ----- e-Transfers with people (order matters: specific ones before the catch-all) -----
+  - {match: "re:e-Transfer.*JIEXU LIN", category: Transfer}             # to/from yourself
+  - {match: "re:e-Transfer.*mysimplii", category: Transfer}
+  - {match: "re:e-Transfer sent (Jerry Jing|20GeorgePayments)", category: Housing}
+  # Damon: monthly condo rent + utilities share (smaller ones fall through to Shared costs)
+  - {match: "re:e-Transfer - (Autodeposit|Request Money) Damon", category: Housing, min_amount: 1000}
+  # Qilin's tuition, paid by you and paid back by him
+  - {match: "MCMASTER UNIVER", category: Paid for others}
+  - {match: "re:e-Transfer - (Autodeposit|Request Money) QILIN XIAO", category: Paid for others, min_amount: 1000}
+  # Dalue's car rentals, paid by you and paid back by him
+  - {match: "ENTERPRISE CANADA", category: Paid for others}
+  - {match: "re:e-Transfer - (Autodeposit|Request Money) DALUE TANG", category: Paid for others, min_amount: 1000}
+  # King William Residence: rent paid for friends (肖奇林, 陈良意 via ZIHAO ZHOU, 屠锦浩 JINHAO TU, 唐大略 DALUE TANG)
+  - {match: "re:King ?Willia|YSI\\*PROP PYMT", category: Paid for others}
+  - {match: "re:e-Transfer - (Autodeposit|Request Money) (ZIHAO ZHOU|JINHAO TU)", category: Paid for others, min_amount: 400}
+  # e-Transfers that name what they paid for
+  - {match: "re:e-Transfer sent (MySweeTooth|malatang)", category: Dining}
+  - {match: "re:e-Transfer sent (buspass|hsr bus)", category: Transportation}
+  - {match: "re:e-Transfer sent Delivery-China", category: Shopping}
+  - {match: "re:e-Transfer sent DavidTaoTicket", category: Entertainment}
+  # immigration consultant (Lisa Qiwen Huang) and IRCC fees
+  - {match: "re:e-Transfer sent (Lisa )?Qiwen Huang", category: Immigration}
+  - {match: "IMMIGRATION CANADA", category: Immigration}
+  # everyone else: settling shared meals, shopping, outings
+  - {match: "re:^e-Transfer (sent|received|- Autodeposit|- Request Money) ", category: Shared costs}

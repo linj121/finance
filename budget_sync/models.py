@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 LEDGER_FIELDS = ["id", "date", "account", "description", "amount", "currency",
-                 "category", "category_source", "source_file"]
+                 "category", "category_source", "source_file", "note"]
 
 
 @dataclass
@@ -19,9 +19,31 @@ class Transaction:
     category: str = ""
     category_source: str = ""   # rule | memory | ai | manual
     id: str = field(default="")
+    note: str = ""              # typed in the sheet; kept across syncs
 
     def key(self) -> tuple:
         return (self.account, self.date.isoformat(), " ".join(self.description.split()).upper(), str(self.amount))
+
+
+@dataclass
+class Balance:
+    """A statement's closing balance. Debts (credit cards) are negative."""
+    account: str
+    date: date
+    amount: Decimal
+    source_file: str
+    kind: str = "deposit"                  # deposit | card
+    # credit cards only, as printed on the statement
+    min_payment: Decimal | None = None
+    due_date: date | None = None
+    credit_limit: Decimal | None = None
+    rate: Decimal | None = None            # annual purchase interest rate, %
+
+
+@dataclass
+class Statement:
+    transactions: list[Transaction]
+    balance: Balance | None = None   # None when the file has no balance (e.g. CSV export)
 
 
 def assign_ids(txns: list[Transaction]) -> None:
